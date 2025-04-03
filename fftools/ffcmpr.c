@@ -1471,7 +1471,7 @@ fail:
 static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const char *vfilters, AVFrame *frame)
 {
     enum AVPixelFormat pix_fmts[FF_ARRAY_ELEMS(sdl_texture_format_map)];
-    char sws_flags_str[512] = "";
+    char sws_flags_str[512] = "flags=spline+full_chroma_int+accurate_rnd+full_chroma_inp:";
     char buffersrc_args[256];
     int ret;
     AVFilterContext *filt_src = NULL, *filt_out = NULL, *last_filter = NULL;
@@ -2618,7 +2618,7 @@ static AVFrame *convert_frame(AVCodecContext *codec_ctx, const AVFrame *frame)
 
     sws_ctx = sws_getContext(frame->width, frame->height, frame->format,
                              oframe->width, oframe->height, oframe->format,
-                             SWS_LANCZOS | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND,
+                             SWS_SPLINE | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND,
                              0, 0, 0);
     if (NULL == sws_ctx) {
         av_log(NULL, AV_LOG_ERROR, "Cannot get sws_ctx.\n");
