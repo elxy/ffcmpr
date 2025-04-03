@@ -185,7 +185,6 @@ typedef struct VideoState {
     Clock extclk;
 
     FrameQueue pictq;
-    FrameQueue sampq;
 
     Decoder viddec;
 
@@ -195,17 +194,9 @@ typedef struct VideoState {
     int frame_drops_early;
     int frame_drops_late;
 
-    int sample_array_index;
-    int last_i_start;
-    AVTXContext *rdft;
-    av_tx_fn rdft_fn;
-    int rdft_bits;
-    float *real_data;
-    AVComplexFloat *rdft_data;
-    int xpos;
-    double last_vis_time;
     SDL_Texture *vis_texture;
     SDL_Texture *vid_texture;
+    uint32_t *texture_buffer;
 
     double frame_timer;
     double frame_last_returned_time;
@@ -240,7 +231,6 @@ typedef struct VideoState {
     VkRenderer *vk_renderer;
     int frame_queued;
     int frame_displayed;
-
 } VideoState;
 
 #define MAX_INPUT_NUM (16)
@@ -283,6 +273,7 @@ static int enable_vulkan = 0;
 static char *vulkan_params = NULL;
 static const char *hwaccel = NULL;
 
+static int use_10bit = 0;
 static const char *save_format = NULL;
 
 /* current context */
@@ -313,6 +304,7 @@ static const struct TextureFormatEntry {
     { AV_PIX_FMT_YUV420P,        SDL_PIXELFORMAT_IYUV },
     { AV_PIX_FMT_YUYV422,        SDL_PIXELFORMAT_YUY2 },
     { AV_PIX_FMT_UYVY422,        SDL_PIXELFORMAT_UYVY },
+    { AV_PIX_FMT_RGB48LE,        SDL_PIXELFORMAT_ARGB2101010 },
     { AV_PIX_FMT_NONE,           SDL_PIXELFORMAT_UNKNOWN },
 };
 
@@ -772,6 +764,22 @@ static void get_sdl_pix_fmt_and_blendmode(int format, Uint32 *sdl_pix_fmt, SDL_B
     }
 }
 
+static void pack_rgb48le_to_ARGB2101010(AVFrame *frame, uint32_t *dst) {
+    uint16_t *src;
+
+    int i, j;
+    for (i = 0; i < frame->height; i++) {
+        src = (uint16_t *)(frame->data[0] + i * frame->linesize[0]);
+        for (j = 0; j < 3 * frame->width; j += 3) {
+            const uint32_t r = src[j] >> 6;
+            const uint32_t g = src[j + 1] >> 6;
+            const uint32_t b = src[j + 2] >> 6;
+            *dst = (r << 20) | (g << 10) | (b);
+            dst++;
+        }
+    }
+}
+
 static int upload_texture(VideoState *is, SDL_Texture **tex, AVFrame *frame) {
     int ret = 0;
     Uint32 sdl_pix_fmt;
@@ -781,6 +789,10 @@ static int upload_texture(VideoState *is, SDL_Texture **tex, AVFrame *frame) {
         return -1;
 
     switch (sdl_pix_fmt) {
+        case SDL_PIXELFORMAT_ARGB2101010:
+            pack_rgb48le_to_ARGB2101010(frame, is->texture_buffer);
+            ret = SDL_UpdateTexture(*tex, NULL, is->texture_buffer, sizeof(uint32_t) * frame->width);
+            break;
         case SDL_PIXELFORMAT_IYUV:
             if (frame->linesize[0] > 0 && frame->linesize[1] > 0 && frame->linesize[2] > 0) {
                 ret = SDL_UpdateYUVTexture(*tex, NULL, frame->data[0], frame->linesize[0],
@@ -914,13 +926,14 @@ static void stream_close(VideoState *is)
 
     /* free all pictures */
     frame_queue_destroy(&is->pictq);
-    frame_queue_destroy(&is->sampq);
     SDL_DestroyCond(is->continue_read_thread);
     av_free(is->filename);
     if (is->vis_texture)
         SDL_DestroyTexture(is->vis_texture);
     if (is->vid_texture)
         SDL_DestroyTexture(is->vid_texture);
+    if (is->texture_buffer)
+        av_free(is->texture_buffer);
     av_free(is);
 }
 
@@ -1485,11 +1498,19 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
     if (!par)
         return AVERROR(ENOMEM);
 
-    for (i = 0; i < is->renderer_info.num_texture_formats; i++) {
-        for (j = 0; j < FF_ARRAY_ELEMS(sdl_texture_format_map) - 1; j++) {
-            if (is->renderer_info.texture_formats[i] == sdl_texture_format_map[j].texture_fmt) {
-                pix_fmts[nb_pix_fmts++] = sdl_texture_format_map[j].format;
-                break;
+    if (use_10bit) {
+        pix_fmts[nb_pix_fmts++] = AV_PIX_FMT_RGB48LE;
+        // prepare texture buffer for 10bit
+        if (is->texture_buffer)
+            av_free(is->texture_buffer);
+        is->texture_buffer = av_malloc(sizeof(uint32_t) * frame->width * frame->height);
+    } else {
+        for (i = 0; i < is->renderer_info.num_texture_formats; i++) {
+            for (j = 0; j < FF_ARRAY_ELEMS(sdl_texture_format_map) - 1; j++) {
+                if (is->renderer_info.texture_formats[i] == sdl_texture_format_map[j].texture_fmt) {
+                    pix_fmts[nb_pix_fmts++] = sdl_texture_format_map[j].format;
+                    break;
+                }
             }
         }
     }
@@ -2157,10 +2178,26 @@ static int read_thread(void *arg)
     return 0;
 }
 
+static void print_render_info(VideoState *is) {
+    int i;
+    Uint32 window_pixel_format = SDL_GetWindowPixelFormat(is->window);
+    av_log(NULL, AV_LOG_VERBOSE, "SDL window pixel format: %s\n", SDL_GetPixelFormatName(window_pixel_format));
+
+    av_log(NULL, AV_LOG_VERBOSE, "SDL %s renderer supported format: ", is->renderer_info.name);
+    for (i = 0; i < is->renderer_info.num_texture_formats; i++) {
+        if (i > 0)
+            av_log(NULL, AV_LOG_VERBOSE, ", ");
+        av_log(NULL, AV_LOG_VERBOSE, "%s", SDL_GetPixelFormatName(is->renderer_info.texture_formats[i]));
+    }
+    av_log(NULL, AV_LOG_VERBOSE, "\n");
+}
+
 static VideoState *stream_open(const char *filename, const AVInputFormat *iformat, int main_stream)
 {
     VideoState *is;
     int ret;
+    int i;
+    int support_10bit = 0;
 
     is = av_mallocz(sizeof(VideoState));
     if (!is)
@@ -2260,6 +2297,22 @@ static VideoState *stream_open(const char *filename, const AVInputFormat *iforma
         if (!is->renderer || !is->renderer_info.num_texture_formats) {
             av_log(NULL, AV_LOG_FATAL, "Failed to create window or renderer: %s", SDL_GetError());
             do_exit();
+        }
+
+        if (main_stream) {
+            print_render_info(is);
+
+            if (use_10bit) {
+                for (i = 0; i < is->renderer_info.num_texture_formats; i++) {
+                    if (SDL_PIXELFORMAT_ARGB2101010 == is->renderer_info.texture_formats[i]) {
+                        support_10bit = 1;
+                        break;
+                    }
+                }
+                if (!support_10bit) {
+                    av_log(NULL, AV_LOG_WARNING, "Renderer does not support 10bit, enabling it may impact rendering performance.\n");
+                }
+            }
         }
     }
     is->window_id = SDL_GetWindowID(is->window);
@@ -3089,6 +3142,7 @@ static const OptionDef options[] = {
     { "vulkan_params",      OPT_TYPE_STRING, OPT_EXPERT, { &vulkan_params }, "vulkan configuration using a list of key=value pairs separated by ':'" },
     { "hwaccel",            OPT_TYPE_STRING, OPT_EXPERT, { &hwaccel }, "use HW accelerated decoding" },
     { "save_format",        OPT_TYPE_STRING,          0, { &save_format }, "format of saved frames, default is png" },
+    { "use_10bit",          OPT_TYPE_BOOL,            0, { &use_10bit }, "force to use 10 bit depth for rendering" },
     { NULL, },
 };
 
