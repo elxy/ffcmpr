@@ -55,6 +55,8 @@ struct VkRenderer {
 
     int (*display)(VkRenderer *renderer, AVFrame *frame);
 
+    int (*display_zoom_offset)(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1);
+
     int (*resize)(VkRenderer *renderer, int width, int height);
 
     void (*destroy)(VkRenderer *renderer);
@@ -715,7 +717,65 @@ static int display(VkRenderer *renderer, AVFrame *frame)
         goto out;
     }
 
+    // fix color properties
+    pl_color_space_from_avframe(&target.color, frame);
+    pl_swapchain_colorspace_hint(ctx->swapchain, &target.color);
+
     pl_frame_from_swapchain(&target, &swap_frame);
+    if (!pl_render_image(ctx->renderer, &pl_frame, &target,
+                         &pl_render_default_params)) {
+        av_log(NULL, AV_LOG_ERROR, "pl_render_image failed\n");
+        ret = AVERROR_EXTERNAL;
+        goto out;
+    }
+
+    if (!pl_swapchain_submit_frame(ctx->swapchain)) {
+        av_log(NULL, AV_LOG_ERROR, "pl_swapchain_submit_frame failed\n");
+        ret = AVERROR_EXTERNAL;
+        goto out;
+    }
+    pl_swapchain_swap_buffers(ctx->swapchain);
+
+out:
+    pl_unmap_avframe(ctx->placebo_vulkan->gpu, &pl_frame);
+    return ret;
+}
+
+static int display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1)
+{
+    struct pl_swapchain_frame swap_frame = {0};
+    struct pl_frame pl_frame = {0};
+    struct pl_frame target = {0};
+    RendererContext *ctx = (RendererContext *) renderer;
+    int ret = 0;
+
+    ret = convert_frame(renderer, frame);
+    if (ret < 0)
+        return ret;
+
+    if (!pl_map_avframe_ex(ctx->placebo_vulkan->gpu, &pl_frame, pl_avframe_params(
+            .frame = frame,
+            .tex = ctx->tex))) {
+        av_log(NULL, AV_LOG_ERROR, "pl_map_avframe_ex failed\n");
+        return AVERROR_EXTERNAL;
+    }
+
+    if (!pl_swapchain_start_frame(ctx->swapchain, &swap_frame)) {
+        av_log(NULL, AV_LOG_ERROR, "start frame failed\n");
+        ret = AVERROR_EXTERNAL;
+        goto out;
+    }
+
+    // fix color properties
+    pl_color_space_from_avframe(&target.color, frame);
+    pl_swapchain_colorspace_hint(ctx->swapchain, &target.color);
+
+    pl_frame_from_swapchain(&target, &swap_frame);
+
+    target.crop.x0 = x0;
+    target.crop.y0 = y0;
+    target.crop.x1 = x1;
+    target.crop.y1 = y1;
     if (!pl_render_image(ctx->renderer, &pl_frame, &target,
                          &pl_render_default_params)) {
         av_log(NULL, AV_LOG_ERROR, "pl_render_image failed\n");
@@ -794,6 +854,7 @@ VkRenderer *vk_get_renderer(void)
     renderer->get_hw_dev = get_hw_dev;
     renderer->create = create;
     renderer->display = display;
+    renderer->display_zoom_offset = display_zoom_offset;
     renderer->resize = resize;
     renderer->destroy = destroy;
 
@@ -823,6 +884,11 @@ int vk_renderer_get_hw_dev(VkRenderer *renderer, AVBufferRef **dev)
 int vk_renderer_display(VkRenderer *renderer, AVFrame *frame)
 {
     return renderer->display(renderer, frame);
+}
+
+int vk_renderer_display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1)
+{
+    return renderer->display_zoom_offset(renderer, frame, x0, x1, y0, y1);
 }
 
 int vk_renderer_resize(VkRenderer *renderer, int width, int height)
