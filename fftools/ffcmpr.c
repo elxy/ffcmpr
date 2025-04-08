@@ -274,6 +274,7 @@ static char *vulkan_params = NULL;
 static const char *hwaccel = NULL;
 
 static int use_10bit = -1;
+static int no_colorspace_hint = 0;
 static const char *save_format = NULL;
 
 /* current context */
@@ -865,7 +866,7 @@ static void video_image_display(VideoState *is)
         x1 = x0 + rect.w;
         y1 = y0 + rect.h;
 
-        vk_renderer_display_zoom_offset(is->vk_renderer, vp->frame, x0, x1, y0, y1);
+        vk_renderer_display_zoom_offset(is->vk_renderer, vp->frame, x0, x1, y0, y1, !no_colorspace_hint);
         return;
     }
 
@@ -3153,7 +3154,7 @@ static const OptionDef options[] = {
     { "stats",              OPT_TYPE_BOOL,   OPT_EXPERT, { &show_status }, "show status", "" },
     { "fast",               OPT_TYPE_BOOL,   OPT_EXPERT, { &fast }, "non spec compliant optimizations", "" },
     { "genpts",             OPT_TYPE_BOOL,   OPT_EXPERT, { &genpts }, "generate pts", "" },
-    { "drp",                OPT_TYPE_INT,    OPT_EXPERT, { &decoder_reorder_pts }, "let decoder reorder pts 0=off 1=on -1=auto", ""},
+    { "drp",                OPT_TYPE_INT,    OPT_EXPERT, { &decoder_reorder_pts }, "let decoder reorder pts 0=off 1=on -1=auto", "" },
     { "lowres",             OPT_TYPE_INT,    OPT_EXPERT, { &lowres }, "", "" },
     { "sync",               OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT, { .func_arg = opt_sync }, "set videos sync. type (type=video/ext)", "type" },
     { "autoexit",           OPT_TYPE_BOOL,   OPT_EXPERT, { &autoexit }, "exit at the end", "" },
@@ -3164,7 +3165,7 @@ static const OptionDef options[] = {
     { "top",                OPT_TYPE_INT,    OPT_EXPERT, { &screen_top }, "set the y position for the top of the window", "y pos" },
     { "vf",                 OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT, { .func_arg = opt_add_vfilter }, "set video filters", "filter_graph" },
     { "i",                  OPT_TYPE_BOOL,            0, { &dummy}, "read specified file", "input_file"},
-    { "vcodec",             OPT_TYPE_STRING, OPT_EXPERT, {    &video_codec_name }, "force video decoder",    "decoder_name" },
+    { "vcodec",             OPT_TYPE_STRING, OPT_EXPERT, { &video_codec_name }, "force video decoder",    "decoder_name" },
     { "autorotate",         OPT_TYPE_BOOL,            0, { &autorotate }, "automatically rotate video", "" },
     { "find_stream_info",   OPT_TYPE_BOOL, OPT_INPUT | OPT_EXPERT, { &find_stream_info },
         "read and decode the streams to fill missing information with heuristics" },
@@ -3174,6 +3175,7 @@ static const OptionDef options[] = {
     { "hwaccel",            OPT_TYPE_STRING, OPT_EXPERT, { &hwaccel }, "use HW accelerated decoding" },
     { "save_format",        OPT_TYPE_STRING,          0, { &save_format }, "format of saved frames, default is png" },
     { "use_10bit",          OPT_TYPE_INT,    OPT_EXPERT, { &use_10bit }, "whether to use 10 bit depth for rendering, 0=off 1=on -1=auto", "" },
+    { "no_colorspace_hint", OPT_TYPE_BOOL,   OPT_EXPERT, { &no_colorspace_hint }, "passthrough color components as used \"as is\", only affect vulkan render", "" },
     { NULL, },
 };
 

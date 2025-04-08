@@ -34,7 +34,7 @@ int vk_renderer_get_hw_dev(VkRenderer *renderer, AVBufferRef **dev);
 
 int vk_renderer_display(VkRenderer *renderer, AVFrame *frame);
 
-int vk_renderer_display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1);
+int vk_renderer_display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1, int colorspace_hint);
 
 int vk_renderer_resize(VkRenderer *renderer, int width, int height);
 

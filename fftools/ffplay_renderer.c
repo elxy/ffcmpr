@@ -55,7 +55,7 @@ struct VkRenderer {
 
     int (*display)(VkRenderer *renderer, AVFrame *frame);
 
-    int (*display_zoom_offset)(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1);
+    int (*display_zoom_offset)(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1, int colorspace_hint);
 
     int (*resize)(VkRenderer *renderer, int width, int height);
 
@@ -717,10 +717,6 @@ static int display(VkRenderer *renderer, AVFrame *frame)
         goto out;
     }
 
-    // fix color properties
-    pl_color_space_from_avframe(&target.color, frame);
-    pl_swapchain_colorspace_hint(ctx->swapchain, &target.color);
-
     pl_frame_from_swapchain(&target, &swap_frame);
     if (!pl_render_image(ctx->renderer, &pl_frame, &target,
                          &pl_render_default_params)) {
@@ -741,7 +737,7 @@ out:
     return ret;
 }
 
-static int display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1)
+static int display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1, int colorspace_hint)
 {
     struct pl_swapchain_frame swap_frame = {0};
     struct pl_frame pl_frame = {0};
@@ -766,9 +762,10 @@ static int display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, f
         goto out;
     }
 
-    // fix color properties
-    pl_color_space_from_avframe(&target.color, frame);
-    pl_swapchain_colorspace_hint(ctx->swapchain, &target.color);
+    if (colorspace_hint) {
+        pl_color_space_from_avframe(&target.color, frame);
+        pl_swapchain_colorspace_hint(ctx->swapchain, &target.color);
+    }
 
     pl_frame_from_swapchain(&target, &swap_frame);
 
@@ -886,9 +883,9 @@ int vk_renderer_display(VkRenderer *renderer, AVFrame *frame)
     return renderer->display(renderer, frame);
 }
 
-int vk_renderer_display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1)
+int vk_renderer_display_zoom_offset(VkRenderer *renderer, AVFrame *frame, float x0, float x1, float y0, float y1, int colorspace_hint)
 {
-    return renderer->display_zoom_offset(renderer, frame, x0, x1, y0, y1);
+    return renderer->display_zoom_offset(renderer, frame, x0, x1, y0, y1, colorspace_hint);
 }
 
 int vk_renderer_resize(VkRenderer *renderer, int width, int height)
