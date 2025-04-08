@@ -273,7 +273,7 @@ static int enable_vulkan = 0;
 static char *vulkan_params = NULL;
 static const char *hwaccel = NULL;
 
-static int use_10bit = 0;
+static int use_10bit = -1;
 static const char *save_format = NULL;
 
 /* current context */
@@ -836,6 +836,9 @@ static void set_sdl_yuv_conversion_mode(AVFrame *frame)
             mode = SDL_YUV_CONVERSION_BT709;
         else if (frame->colorspace == AVCOL_SPC_BT470BG || frame->colorspace == AVCOL_SPC_SMPTE170M)
             mode = SDL_YUV_CONVERSION_BT601;
+    }
+    if (frame) {
+        av_log(NULL, AV_LOG_VERBOSE, "SDL_YUV_CONVERSION_MODE: %d, for pixel format %s\n", mode, av_get_pix_fmt_name(frame->format));
     }
     SDL_SetYUVConversionMode(mode); /* FIXME: no support for linear transfer */
 #endif
@@ -1481,6 +1484,48 @@ fail:
     return ret;
 }
 
+static int need_10bit_rendering(const VideoState *is, const AVFrame *frame)
+{
+    const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get(frame->format);
+    int c;
+    int frame_need_10bit = 0;
+
+    for (c = 0; c < pixdesc->nb_components; c++) {
+        if (pixdesc->comp[c].depth > 8) {
+            frame_need_10bit = 1;
+            break;
+        }
+    }
+
+    if (0 == use_10bit) {
+        if (frame_need_10bit && !is->vk_renderer) {
+            av_log(NULL, AV_LOG_WARNING, "%s: rendering %s in 8bit may affect image quality.\n",
+                   is->filename, pixdesc->name);
+        }
+        return 0;
+    }
+
+    if (0 < use_10bit) {
+        if (!frame_need_10bit) {
+            av_log(NULL, AV_LOG_WARNING, "%s: rendering %s in 10bit may affect performance.\n",
+                   is->filename, pixdesc->name);
+        }
+        return 1;
+    }
+
+    // use_10bit < -1: auto
+    if (frame_need_10bit) {
+        if (is->vk_renderer) {
+            av_log(NULL, AV_LOG_VERBOSE, "%s: leave %s rendering to Vulkan backend.\n",
+                   is->filename, pixdesc->name);
+            return 0;
+        }
+        av_log(NULL, AV_LOG_VERBOSE, "%s: SDL use 10bit (rgb48) to render %s.\n",
+               is->filename, pixdesc->name);
+    }
+    return frame_need_10bit;
+}
+
 static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const char *vfilters, AVFrame *frame)
 {
     enum AVPixelFormat pix_fmts[FF_ARRAY_ELEMS(sdl_texture_format_map)];
@@ -1498,11 +1543,11 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
     if (!par)
         return AVERROR(ENOMEM);
 
-    if (use_10bit) {
+    if (need_10bit_rendering(is, frame)) {
         pix_fmts[nb_pix_fmts++] = AV_PIX_FMT_RGB48LE;
-        // prepare texture buffer for 10bit
         if (is->texture_buffer)
             av_free(is->texture_buffer);
+        // prepare texture buffer for 10bit
         is->texture_buffer = av_malloc(sizeof(uint32_t) * frame->width * frame->height);
     } else {
         for (i = 0; i < is->renderer_info.num_texture_formats; i++) {
@@ -2181,23 +2226,21 @@ static int read_thread(void *arg)
 static void print_render_info(VideoState *is) {
     int i;
     Uint32 window_pixel_format = SDL_GetWindowPixelFormat(is->window);
-    av_log(NULL, AV_LOG_VERBOSE, "SDL window pixel format: %s\n", SDL_GetPixelFormatName(window_pixel_format));
+    av_log(NULL, AV_LOG_DEBUG, "SDL window pixel format: %s\n", SDL_GetPixelFormatName(window_pixel_format));
 
-    av_log(NULL, AV_LOG_VERBOSE, "SDL %s renderer supported format: ", is->renderer_info.name);
+    av_log(NULL, AV_LOG_DEBUG, "SDL %s renderer supported format: ", is->renderer_info.name);
     for (i = 0; i < is->renderer_info.num_texture_formats; i++) {
         if (i > 0)
-            av_log(NULL, AV_LOG_VERBOSE, ", ");
-        av_log(NULL, AV_LOG_VERBOSE, "%s", SDL_GetPixelFormatName(is->renderer_info.texture_formats[i]));
+            av_log(NULL, AV_LOG_DEBUG, ", ");
+        av_log(NULL, AV_LOG_DEBUG, "%s", SDL_GetPixelFormatName(is->renderer_info.texture_formats[i]));
     }
-    av_log(NULL, AV_LOG_VERBOSE, "\n");
+    av_log(NULL, AV_LOG_DEBUG, "\n");
 }
 
 static VideoState *stream_open(const char *filename, const AVInputFormat *iformat, int main_stream)
 {
     VideoState *is;
     int ret;
-    int i;
-    int support_10bit = 0;
 
     is = av_mallocz(sizeof(VideoState));
     if (!is)
@@ -2301,18 +2344,6 @@ static VideoState *stream_open(const char *filename, const AVInputFormat *iforma
 
         if (main_stream) {
             print_render_info(is);
-
-            if (use_10bit) {
-                for (i = 0; i < is->renderer_info.num_texture_formats; i++) {
-                    if (SDL_PIXELFORMAT_ARGB2101010 == is->renderer_info.texture_formats[i]) {
-                        support_10bit = 1;
-                        break;
-                    }
-                }
-                if (!support_10bit) {
-                    av_log(NULL, AV_LOG_WARNING, "Renderer does not support 10bit, enabling it may impact rendering performance.\n");
-                }
-            }
         }
     }
     is->window_id = SDL_GetWindowID(is->window);
@@ -3142,7 +3173,7 @@ static const OptionDef options[] = {
     { "vulkan_params",      OPT_TYPE_STRING, OPT_EXPERT, { &vulkan_params }, "vulkan configuration using a list of key=value pairs separated by ':'" },
     { "hwaccel",            OPT_TYPE_STRING, OPT_EXPERT, { &hwaccel }, "use HW accelerated decoding" },
     { "save_format",        OPT_TYPE_STRING,          0, { &save_format }, "format of saved frames, default is png" },
-    { "use_10bit",          OPT_TYPE_BOOL,            0, { &use_10bit }, "force to use 10 bit depth for rendering" },
+    { "use_10bit",          OPT_TYPE_INT,    OPT_EXPERT, { &use_10bit }, "whether to use 10 bit depth for rendering, 0=off 1=on -1=auto", "" },
     { NULL, },
 };
 
