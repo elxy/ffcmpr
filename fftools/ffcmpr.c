@@ -1530,6 +1530,7 @@ static int need_10bit_rendering(const VideoState *is, const AVFrame *frame)
 static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const char *vfilters, AVFrame *frame)
 {
     enum AVPixelFormat pix_fmts[FF_ARRAY_ELEMS(sdl_texture_format_map)];
+    const AVPixFmtDescriptor *pixdesc;
     char sws_flags_str[512] = "flags=spline+full_chroma_int+accurate_rnd+full_chroma_inp:";
     char buffersrc_args[256];
     int ret;
@@ -1553,10 +1554,18 @@ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const c
     } else {
         for (i = 0; i < is->renderer_info.num_texture_formats; i++) {
             for (j = 0; j < FF_ARRAY_ELEMS(sdl_texture_format_map) - 1; j++) {
-                if (is->renderer_info.texture_formats[i] == sdl_texture_format_map[j].texture_fmt) {
-                    pix_fmts[nb_pix_fmts++] = sdl_texture_format_map[j].format;
-                    break;
+                if (is->renderer_info.texture_formats[i] != sdl_texture_format_map[j].texture_fmt) {
+                    continue;
                 }
+
+                pixdesc = av_pix_fmt_desc_get(sdl_texture_format_map[j].format);
+                if (AVCOL_RANGE_MPEG == frame->color_range && !(pixdesc->flags & AV_PIX_FMT_FLAG_RGB)) {
+                    // SDL does not process limited range, so we need to convert it by ourselves.
+                    continue;
+                }
+
+                pix_fmts[nb_pix_fmts++] = sdl_texture_format_map[j].format;
+                break;
             }
         }
     }
